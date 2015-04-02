@@ -25,6 +25,7 @@ using snowcrash::DataStructure;
 using snowcrash::Asset;
 using snowcrash::Payload;
 using snowcrash::Value;
+using snowcrash::Values;
 using snowcrash::Parameter;
 using snowcrash::TransactionExample;
 using snowcrash::Request;
@@ -33,183 +34,219 @@ using snowcrash::Action;
 using snowcrash::Resource;
 using snowcrash::Blueprint;
 
-sos::Object WrapValue(const mson::Value& value)
-{
-    sos::Object valueObject;
+template<typename T> struct Wrap;
 
-    // Literal
-    valueObject.set(SerializeKey::Literal, sos::String(value.literal));
+struct Proxy {
+    sos::Object object;
 
-    // Variable
-    valueObject.set(SerializeKey::Variable, sos::Boolean(value.variable));
+    Proxy(){}
 
-    return valueObject;
-}
-
-sos::Object WrapSymbol(const mson::Symbol& symbol)
-{
-    sos::Object symbolObject;
-
-    // Literal
-    symbolObject.set(SerializeKey::Literal, sos::String(symbol.literal));
-
-    // Variable
-    symbolObject.set(SerializeKey::Variable, sos::Boolean(symbol.variable));
-
-    return symbolObject;
-}
-
-sos::Base WrapTypeName(const mson::TypeName& typeName)
-{
-    if (typeName.empty()) {
-        return sos::Null();
+    template<typename T> Proxy(const std::string& key, const T& value) {
+        set(key, value);
     }
 
-    if (typeName.base != mson::UndefinedTypeName) {
+    template<typename T> Proxy(const T& value) : object(Wrap<T>()(value)) {
+    }
 
-        std::string baseTypeName;
+    template<typename T>
+    Proxy& operator()(const std::string& key, const T& value) {
+        return set(key, value);
+    }
 
-        switch (typeName.base) {
+    template<typename T>
+    Proxy& set(const std::string& key, const T& value) {
+        Wrap<T> Wrapper;
+        object.set(key, Wrapper(value));
+        return *this;
+    }
 
-            case mson::BooleanTypeName:
-                baseTypeName = "boolean";
-                break;
+    operator sos::Object() const { return object; }
+};
 
-            case mson::StringTypeName:
-                baseTypeName = "string";
-                break;
+struct true_type {};
+struct false_type {};
 
-            case mson::NumberTypeName:
-                baseTypeName = "number";
-                break;
+template<typename T> struct is_vector : public false_type {};
+template<typename T, typename A> struct is_vector<std::vector<T, A> > : public true_type {};
 
-            case mson::ArrayTypeName:
-                baseTypeName = "array";
-                break;
+template<typename T>
+struct Wrap {
+    sos::Array operator()(const T& value, true_type) const {
+        typedef typename T::value_type value_type;
+        typedef Wrap<value_type> wrapper_type;
+        wrapper_type wrap;
 
-            case mson::EnumTypeName:
-                baseTypeName = "enum";
-                break;
+        return WrapCollection<value_type>()(value, wrap);
+    }
 
-            case mson::ObjectTypeName:
-                baseTypeName = "object";
-                break;
+    sos::Array operator()(const T& value) const {
+        return (*this)(value, is_vector<T>());
+    }
+};
 
-            default:
-                break;
+template<> struct Wrap<std::string>{
+    sos::String operator()(const std::string& val) const {
+        return sos::String(val);
+    }
+};
+
+template<> struct Wrap<bool>{
+    sos::Boolean operator()(const bool& val) const {
+        return sos::Boolean(val);
+    }
+};
+
+template<> struct Wrap<Proxy>{
+    sos::Object operator()(const Proxy& val) const {
+        return val.object;
+    }
+};
+
+template<> struct Wrap<sos::Array>{
+    sos::Array operator()(const sos::Array& val) const {
+        return val;
+    }
+};
+
+template<> struct Wrap<mson::Value>{
+    sos::Object operator()(const mson::Value& value) const {
+        return Proxy(SerializeKey::Literal, value.literal)
+                    (SerializeKey::Variable, value.variable);
+    }
+};
+
+template<> struct Wrap<mson::Symbol>{
+    sos::Object operator()(const mson::Symbol& symbol) const {
+        return Proxy(SerializeKey::Literal, symbol.literal)
+                    (SerializeKey::Variable, symbol.variable);
+    }
+};
+
+static const std::string TypeNameToString(const mson::TypeName& typeName)
+{
+    switch (typeName.base) {
+
+        case mson::BooleanTypeName:
+            return "boolean";
+
+        case mson::StringTypeName:
+            return "string";
+
+        case mson::NumberTypeName:
+            return "number";
+
+        case mson::ArrayTypeName:
+            return "array";
+
+        case mson::EnumTypeName:
+            return "enum";
+
+        case mson::ObjectTypeName:
+            return "object";
+
+        default:
+            break;
+    }
+
+    return std::string();
+}
+
+template<> struct Wrap<mson::TypeName> {
+    sos::Base operator()(const mson::TypeName& typeName) const {
+        if (typeName.empty()) {
+            return sos::Null();
         }
 
-        return sos::String(baseTypeName);
+        if (typeName.base != mson::UndefinedTypeName) {
+            return sos::String(TypeNameToString(typeName));
+        }
+
+        return Wrap<mson::Symbol>()(typeName.symbol);
     }
+};
 
-    return WrapSymbol(typeName.symbol);
-}
+template<> struct Wrap<mson::TypeAttributes> {
+    sos::Array operator()(const mson::TypeAttributes& typeAttributes)
+    {
+        sos::Array typeAttributesArray;
 
+        if (typeAttributes & mson::RequiredTypeAttribute) {
+            typeAttributesArray.push(sos::String("required"));
+        }
+        else if (typeAttributes & mson::OptionalTypeAttribute) {
+            typeAttributesArray.push(sos::String("optional"));
+        }
+        else if (typeAttributes & mson::DefaultTypeAttribute) {
+            typeAttributesArray.push(sos::String("default"));
+        }
+        else if (typeAttributes & mson::SampleTypeAttribute) {
+            typeAttributesArray.push(sos::String("sample"));
+        }
+        else if (typeAttributes & mson::FixedTypeAttribute) {
+            typeAttributesArray.push(sos::String("fixed"));
+        }
 
-sos::Object WrapTypeSpecification(const mson::TypeSpecification& typeSpecification)
-{
-    sos::Object typeSpecificationObject;
-
-    // Name
-    typeSpecificationObject.set(SerializeKey::Name, WrapTypeName(typeSpecification.name));
-
-    // Nested Types
-    typeSpecificationObject.set(SerializeKey::NestedTypes, 
-                                WrapCollection<mson::TypeName>()(typeSpecification.nestedTypes, WrapTypeName));
-
-    return typeSpecificationObject;
-}
-
-sos::Array WrapTypeAttributes(const mson::TypeAttributes& typeAttributes)
-{
-    sos::Array typeAttributesArray;
-
-    if (typeAttributes & mson::RequiredTypeAttribute) {
-        typeAttributesArray.push(sos::String("required"));
+        return typeAttributesArray;
     }
-    else if (typeAttributes & mson::OptionalTypeAttribute) {
-        typeAttributesArray.push(sos::String("optional"));
+};
+
+template<> struct Wrap<mson::TypeSpecification> {
+    sos::Object operator()(const mson::TypeSpecification& value) const {
+        return Proxy(SerializeKey::Name, value.name)
+                    (SerializeKey::NestedTypes, value.nestedTypes);
     }
-    else if (typeAttributes & mson::DefaultTypeAttribute) {
-        typeAttributesArray.push(sos::String("default"));
+};
+
+template<> struct Wrap<mson::TypeDefinition> {
+    sos::Object operator()(const mson::TypeDefinition& typeDefinition) const {
+        return Proxy(SerializeKey::TypeSpecification, typeDefinition.typeSpecification)
+                    (SerializeKey::Attributes, typeDefinition.attributes);
     }
-    else if (typeAttributes & mson::SampleTypeAttribute) {
-        typeAttributesArray.push(sos::String("sample"));
+};
+
+template<> struct Wrap<mson::ValueDefinition> {
+    sos::Object operator()(const mson::ValueDefinition& value) const {
+        return Proxy(SerializeKey::Values, value.values)
+                    (SerializeKey::TypeDefinition, value.typeDefinition);
     }
-    else if (typeAttributes & mson::FixedTypeAttribute) {
-        typeAttributesArray.push(sos::String("fixed"));
+};
+
+template<> struct Wrap<mson::PropertyName> {
+    sos::Object operator()(const mson::PropertyName& value) const {
+        Proxy object;
+        if (!value.literal.empty()) {
+            object.set(SerializeKey::Literal, value.literal);
+        }
+        else if (!value.variable.empty()) {
+            object.set(SerializeKey::Variable, value.variable);
+        }
+        return object;
     }
+};
 
-    return typeAttributesArray;
-}
-
-sos::Object WrapTypeDefinition(const mson::TypeDefinition& typeDefinition)
-{
-    sos::Object typeDefinitionObject;
-
-    // Type Specification
-    typeDefinitionObject.set(SerializeKey::TypeSpecification, WrapTypeSpecification(typeDefinition.typeSpecification));
-
-    // Type Attributes
-    typeDefinitionObject.set(SerializeKey::Attributes, WrapTypeAttributes(typeDefinition.attributes));
-
-    return typeDefinitionObject;
-}
-
-sos::Object WrapValueDefinition(const mson::ValueDefinition& valueDefinition)
-{
-    sos::Object valueDefinitionObject;
-
-    // Values
-    valueDefinitionObject.set(SerializeKey::Values,
-                              WrapCollection<mson::Value>()(valueDefinition.values, WrapValue));
-
-    // Type Definition
-    valueDefinitionObject.set(SerializeKey::TypeDefinition, WrapTypeDefinition(valueDefinition.typeDefinition));
-
-    return valueDefinitionObject;
-}
-
-sos::Object WrapPropertyName(const mson::PropertyName& propertyName)
-{
-    sos::Object propertyNameObject;
-
-    if (!propertyName.literal.empty()) {
-        propertyNameObject.set(SerializeKey::Literal, sos::String(propertyName.literal));
-    }
-    else if (!propertyName.variable.empty()) {
-        propertyNameObject.set(SerializeKey::Variable, WrapValueDefinition(propertyName.variable));
-    }
-
-    return propertyNameObject;
-}
-
-// Forward declarations
-sos::Object WrapTypeSection(const mson::TypeSection& typeSection);
-
-const sos::String TypeSectionClassToString(const mson::TypeSection::Class& klass)
+static const std::string TypeSectionClassToString(const mson::TypeSection::Class& klass)
 {
     switch (klass) {
         case mson::TypeSection::BlockDescriptionClass:
-            return sos::String("blockDescription");
+            return "blockDescription";
 
         case mson::TypeSection::MemberTypeClass:
-            return sos::String("memberType");
+            return "memberType";
 
         case mson::TypeSection::SampleClass:
-            return sos::String("sample");
+            return "sample";
 
         case mson::TypeSection::DefaultClass:
-            return sos::String("default");
+            return "default";
 
         default:
-            return sos::String();
+            break;
     }
 
-    return sos::String();
+    return std::string();
 }
 
-sos::String AssetRoleToString(const AssetRole& role)
+static const std::string AssetRoleToString(const AssetRole& role)
 {
     std::string str;
 
@@ -226,445 +263,267 @@ sos::String AssetRoleToString(const AssetRole& role)
             break;
     }
 
-    return sos::String(str);
+    return std::string(str);
 }
 
-sos::String ElementClassToString(const Element::Class& element)
+static const std::string ElementClassToString(const Element::Class& element)
 {
-    std::string str;
-
     switch (element) {
         case Element::CategoryElement:
-            str = "category";
-            break;
+            return "category";
 
         case Element::CopyElement:
-            str = "copy";
-            break;
+            return "copy";
 
         case Element::ResourceElement:
-            str = "resource";
-            break;
+            return "resource";
 
         case Element::DataStructureElement:
-            str = "dataStructure";
-            break;
+            return "dataStructure";
 
         case Element::AssetElement:
-            str = "asset";
-            break;
+            return "asset";
 
         default:
             break;
     }
 
-    return sos::String(str);
+    return std::string();
 }
 
-sos::Object WrapNamedType(const mson::NamedType& namedType)
-{
-    sos::Object namedTypeObject;
-
-    // Name
-    namedTypeObject.set(SerializeKey::Name, WrapTypeName(namedType.name));
-
-    // Type Definition
-    namedTypeObject.set(SerializeKey::TypeDefinition, WrapTypeDefinition(namedType.typeDefinition));
-
-    // Type Sections
-    namedTypeObject.set(SerializeKey::Sections, 
-                        WrapCollection<mson::TypeSection>()(namedType.sections, WrapTypeSection));
-
-    return namedTypeObject;
-}
-
-sos::Object WrapKeyValue(const KeyValuePair& keyValue)
-{
-    sos::Object keyValueObject;
-
-    // Name
-    keyValueObject.set(SerializeKey::Name, sos::String(keyValue.first));
-
-    // Value
-    keyValueObject.set(SerializeKey::Value, sos::String(keyValue.second));
-
-    return keyValueObject;
-}
-
-sos::Object WrapMetadata(const Metadata& metadata)
-{
-    return WrapKeyValue(metadata);
-}
-
-sos::Object WrapHeader(const Header& header)
-{
-    return WrapKeyValue(header);
-}
-
-sos::Object WrapReference(const Reference& reference)
-{
-    sos::Object referenceObject;
-
-    // Id
-    referenceObject.set(SerializeKey::Id, sos::String(reference.id));
-
-    return referenceObject;
-}
-
-sos::Object WrapPropertyMember(const mson::PropertyMember& propertyMember)
-{
-    sos::Object propertyMemberObject;
-
-    // Name
-    propertyMemberObject.set(SerializeKey::Name, WrapPropertyName(propertyMember.name));
-
-    // Description
-    propertyMemberObject.set(SerializeKey::Description, sos::String(propertyMember.description));
-
-    // Value Definition
-    propertyMemberObject.set(SerializeKey::ValueDefinition, WrapValueDefinition(propertyMember.valueDefinition));
-
-    // Type Sections
-    propertyMemberObject.set(SerializeKey::Sections,
-                             WrapCollection<mson::TypeSection>()(propertyMember.sections, WrapTypeSection));
-
-    return propertyMemberObject;
-}
-
-sos::Object WrapValueMember(const mson::ValueMember& valueMember)
-{
-    sos::Object valueMemberObject;
-
-    // Description
-    valueMemberObject.set(SerializeKey::Description, sos::String(valueMember.description));
-
-    // Value Definition
-    valueMemberObject.set(SerializeKey::ValueDefinition, WrapValueDefinition(valueMember.valueDefinition));
-
-    // Type Sections
-    valueMemberObject.set(SerializeKey::Sections,
-                          WrapCollection<mson::TypeSection>()(valueMember.sections, WrapTypeSection));
-
-    return valueMemberObject;
-}
-
-sos::Object WrapMixin(const mson::Mixin& mixin)
-{
-    return WrapTypeDefinition(mixin);
-}
-
-sos::Object WrapMSONElement(const mson::Element& element)
-{
-    sos::Object elementObject;
-    std::string klass;
-
-    switch (element.klass) {
-
-        case mson::Element::PropertyClass:
-        {
-            klass = "property";
-            elementObject.set(SerializeKey::Content, WrapPropertyMember(element.content.property));
-            break;
-        }
-
-        case mson::Element::ValueClass:
-        {
-            klass = "value";
-            elementObject.set(SerializeKey::Content, WrapValueMember(element.content.value));
-            break;
-        }
-
-        case mson::Element::MixinClass:
-        {
-            klass = "mixin";
-            elementObject.set(SerializeKey::Content, WrapMixin(element.content.mixin));
-            break;
-        }
-
-        case mson::Element::OneOfClass:
-        {
-            klass = "oneOf";
-            elementObject.set(SerializeKey::Content, 
-                              WrapCollection<mson::Element>()(element.content.oneOf(), WrapMSONElement));
-            break;
-        }
-
-        case mson::Element::GroupClass:
-        {
-            klass = "group";
-            elementObject.set(SerializeKey::Content, 
-                              WrapCollection<mson::Element>()(element.content.elements(), WrapMSONElement));
-            break;
-        }
-
-        default:
-            break;
+template<> struct Wrap<KeyValuePair> {
+    sos::Object operator()(const KeyValuePair& value) const {
+        return Proxy(SerializeKey::Name, value.first)
+                    (SerializeKey::Value, value.second);
     }
+};
 
-    elementObject.set(SerializeKey::Class, sos::String(klass));
-
-    return elementObject;
-}
-
-sos::Object WrapTypeSection(const mson::TypeSection& section)
-{
-    sos::Object object;
-
-    // Class
-    object.set(SerializeKey::Class, TypeSectionClassToString(section.klass));
-
-    // Content
-    if (!section.content.description.empty()) {
-        object.set(SerializeKey::Content, sos::String(section.content.description));
+template<> struct Wrap<Reference> {
+    sos::Object operator()(const Reference& value) const {
+        return Proxy(SerializeKey::Id, value.id);
     }
-    else if (!section.content.value.empty()) {
-        object.set(SerializeKey::Content, sos::String(section.content.value));
+};
+
+template<> struct Wrap<mson::PropertyMember> {
+    sos::Object operator()(const mson::PropertyMember& value) const {
+        return Proxy(SerializeKey::Name, value.name)
+                    (SerializeKey::Description, value.description)
+                    (SerializeKey::ValueDefinition, value.valueDefinition)
+                    (SerializeKey::Sections, value.sections);
     }
-    else if (!section.content.elements().empty()) {
-        object.set(SerializeKey::Content, 
-                   WrapCollection<mson::Element>()(section.content.elements(), WrapMSONElement));
+};
+
+template<> struct Wrap<mson::ValueMember> {
+    sos::Object operator()(const mson::ValueMember& value) const {
+        return Proxy(SerializeKey::Description, value.description)
+                    (SerializeKey::ValueDefinition, value.valueDefinition)
+                    (SerializeKey::Sections, value.sections);
     }
+};
 
-    return object;
-}
+template<> struct Wrap<mson::Element> {
+    sos::Object operator()(const mson::Element& element) const {
+        Proxy object;
+        std::string klass;
 
-sos::Object WrapDataStructure(const DataStructure& dataStructure)
-{
-    sos::Object dataStructureObject;
+        switch (element.klass) {
 
-    // Element
-    dataStructureObject.set(SerializeKey::Element, ElementClassToString(Element::DataStructureElement));
+            case mson::Element::PropertyClass:
+            {
+                klass = "property";
+                object.set(SerializeKey::Content, element.content.property);
+                break;
+            }
 
-    // Name
-    dataStructureObject.set(SerializeKey::Name, WrapTypeName(dataStructure.name));
+            case mson::Element::ValueClass:
+            {
+                klass = "value";
+                object.set(SerializeKey::Content, element.content.value);
+                break;
+            }
 
-    // Type Definition
-    dataStructureObject.set(SerializeKey::TypeDefinition, WrapTypeDefinition(dataStructure.typeDefinition));
+            case mson::Element::MixinClass:
+            {
+                klass = "mixin";
+                object.set(SerializeKey::Content, element.content.mixin);
+                break;
+            }
 
-    // Type Sections
-    dataStructureObject.set(SerializeKey::Sections,
-                            WrapCollection<mson::TypeSection>()(dataStructure.sections, WrapTypeSection));
+            case mson::Element::OneOfClass:
+            {
+                klass = "oneOf";
+                object.set(SerializeKey::Content, element.content.oneOf());
+                break;
+            }
 
-    return dataStructureObject;
-}
+            case mson::Element::GroupClass:
+            {
+                klass = "group";
+                object.set(SerializeKey::Content, element.content.elements());
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        object.set(SerializeKey::Class, klass);
+
+        return object;
+    }
+};
+
+template<> struct Wrap<mson::TypeSection> {
+    sos::Object operator()(const mson::TypeSection& section) const {
+        Proxy object;
+
+        object.set(SerializeKey::Class, TypeSectionClassToString(section.klass));
+
+        if (!section.content.description.empty()) {
+            object.set(SerializeKey::Content, section.content.description);
+        }
+        else if (!section.content.value.empty()) {
+            object.set(SerializeKey::Content, section.content.value);
+        }
+        else if (!section.content.elements().empty()) {
+            object.set(SerializeKey::Content, section.content.elements());
+        }
+
+        return object;
+        }
+};
+
+template<> struct Wrap<DataStructure> {
+    sos::Object operator()(const DataStructure& dataStructure) const {
+        return Proxy(SerializeKey::Element, ElementClassToString(Element::DataStructureElement))
+                    (SerializeKey::Name, dataStructure.name)
+                    (SerializeKey::TypeDefinition, dataStructure.typeDefinition)
+                    (SerializeKey::Sections, dataStructure.sections);
+    }
+};
 
 sos::Object WrapAsset(const Asset& asset, const AssetRole& role)
 {
-    sos::Object assetObject;
-
-    // Element
-    assetObject.set(SerializeKey::Element, ElementClassToString(Element::AssetElement));
-
-    // Attributes
-    sos::Object attributes;
-
-    /// Role
-    attributes.set(SerializeKey::Role, AssetRoleToString(role));
-
-    assetObject.set(SerializeKey::Attributes, attributes);
-
-    // Content
-    assetObject.set(SerializeKey::Content, sos::String(asset));
-
-    return assetObject;
+    return Proxy(SerializeKey::Element, ElementClassToString(Element::AssetElement))
+                (SerializeKey::Attributes, 
+                    Proxy(SerializeKey::Role, AssetRoleToString(role))
+                )
+                (SerializeKey::Content, asset);
 }
 
-sos::Object WrapPayload(const Payload& payload)
-{
-    sos::Object payloadObject;
+template<> struct Wrap<Payload> {
+    sos::Object operator()(const Payload& payload) const {
+        Proxy object;
 
-    // Reference
-    if (!payload.reference.id.empty()) {
-        payloadObject.set(SerializeKey::Reference, WrapReference(payload.reference));
+        // Reference
+        if (!payload.reference.id.empty()) {
+            object.set(SerializeKey::Reference, payload.reference);
+        }
+
+        object
+            .set(SerializeKey::Name, payload.name)
+            .set(SerializeKey::Description, payload.description)
+            .set(SerializeKey::Headers, payload.headers)
+            .set(SerializeKey::Body, payload.body)
+            .set(SerializeKey::Schema, payload.schema);
+
+        sos::Array content;
+
+        if (!payload.attributes.empty()) {
+            content.push(Wrap<DataStructure>()(payload.attributes));
+        }
+
+        if (!payload.body.empty()) {
+            content.push(WrapAsset(payload.body, BodyExampleAssetRole));
+        }
+
+        if (!payload.schema.empty()) {
+            content.push(WrapAsset(payload.schema, BodySchemaAssetRole));
+        }
+
+        object.set(SerializeKey::Content, content);
+
+        return object;
     }
+};
 
-    // Name
-    payloadObject.set(SerializeKey::Name, sos::String(payload.name));
-
-    // Description
-    payloadObject.set(SerializeKey::Description, sos::String(payload.description));
-
-    // Headers
-    payloadObject.set(SerializeKey::Headers,
-                      WrapCollection<Header>()(payload.headers, WrapHeader));
-
-    // Body
-    payloadObject.set(SerializeKey::Body, sos::String(payload.body));
-
-    // Schema
-    payloadObject.set(SerializeKey::Schema, sos::String(payload.schema));
-
-    // Content
-    sos::Array content;
-
-    /// Attributes
-    if (!payload.attributes.empty()) {
-        content.push(WrapDataStructure(payload.attributes));
+// Value is alias for std::string
+sos::Object WrapValue(const Value& value) {
+    return Proxy(SerializeKey::Value, value);
+}
+template<> struct Wrap<Values> {
+    sos::Array operator()(const Values& value) const {
+        return WrapCollection<Values>()(value, WrapValue);
     }
+};
 
-    /// Asset 'bodyExample'
-    if (!payload.body.empty()) {
-        content.push(WrapAsset(payload.body, BodyExampleAssetRole));
+template<> struct Wrap<Parameter> {
+    sos::Object operator()(const Parameter& parameter) const {
+        return Proxy(SerializeKey::Name, parameter.name)
+                    (SerializeKey::Description, parameter.description)
+                    (SerializeKey::Type, parameter.type)
+                    (SerializeKey::Required, bool(parameter.use != snowcrash::OptionalParameterUse))
+                    (SerializeKey::Default, parameter.defaultValue)
+                    (SerializeKey::Example, parameter.exampleValue)
+                    (SerializeKey::Values, parameter.values);
     }
+};
 
-    /// Asset 'bodySchema'
-    if (!payload.schema.empty()) {
-        content.push(WrapAsset(payload.schema, BodySchemaAssetRole));
+template<> struct Wrap<TransactionExample> {
+    sos::Object operator()(const TransactionExample& example) const {
+        return Proxy(SerializeKey::Name, example.name)
+                    (SerializeKey::Description, example.description)
+                    (SerializeKey::Requests, example.requests)
+                    (SerializeKey::Responses, example.responses);
     }
+};
 
-    payloadObject.set(SerializeKey::Content, content);
+template<> struct Wrap<Action> {
+    sos::Object operator()(const Action& action) const {
+        sos::Array content;
 
-    return payloadObject;
-}
+        if (!action.attributes.empty()) {
+            content.push(Wrap<DataStructure>()(action.attributes));
+        }
 
-sos::Object WrapParameterValue(const Value& value)
-{
-    sos::Object object;
-    object.set(SerializeKey::Value, sos::String(value.c_str()));
-
-    return object;
-}
-
-sos::Object WrapParameter(const Parameter& parameter)
-{
-    sos::Object parameterObject;
-
-    // Name
-    parameterObject.set(SerializeKey::Name, sos::String(parameter.name));
-
-    // Description
-    parameterObject.set(SerializeKey::Description, sos::String(parameter.description));
-
-    // Type
-    parameterObject.set(SerializeKey::Type, sos::String(parameter.type));
-
-    // Use
-    parameterObject.set(SerializeKey::Required, sos::Boolean(parameter.use != snowcrash::OptionalParameterUse));
-
-    // Default Value
-    parameterObject.set(SerializeKey::Default, sos::String(parameter.defaultValue));
-
-    // Example Value
-    parameterObject.set(SerializeKey::Example, sos::String(parameter.exampleValue));
-
-    // Values
-    parameterObject.set(SerializeKey::Values, 
-                        WrapCollection<Value>()(parameter.values, WrapParameterValue));
-
-    return parameterObject;
-}
-
-sos::Object WrapTransactionExample(const TransactionExample& example)
-{
-    sos::Object exampleObject;
-
-    // Name
-    exampleObject.set(SerializeKey::Name, sos::String(example.name));
-
-    // Description
-    exampleObject.set(SerializeKey::Description, sos::String(example.description));
-
-    // Requests
-    exampleObject.set(SerializeKey::Requests,
-                      WrapCollection<Request>()(example.requests, WrapPayload));
-
-    // Responses
-    exampleObject.set(SerializeKey::Responses,
-                      WrapCollection<Response>()(example.responses, WrapPayload));
-
-    return exampleObject;
-}
-
-sos::Object WrapAction(const Action& action)
-{
-    sos::Object actionObject;
-
-    // Name
-    actionObject.set(SerializeKey::Name, sos::String(action.name));
-
-    // Description
-    actionObject.set(SerializeKey::Description, sos::String(action.description));
-
-    // HTTP Method
-    actionObject.set(SerializeKey::Method, sos::String(action.method));
-
-    // Parameters
-    actionObject.set(SerializeKey::Parameters,
-                     WrapCollection<Parameter>()(action.parameters, WrapParameter));
-
-    // Attributes
-    sos::Object attributes;
-
-    /// Relation
-    attributes.set(SerializeKey::Relation, sos::String(action.relation.str));
-
-    /// URI Template
-    attributes.set(SerializeKey::URITemplate, sos::String(action.uriTemplate));
-
-    actionObject.set(SerializeKey::Attributes, attributes);
-
-    // Content
-    sos::Array content;
-
-    if (!action.attributes.empty()) {
-        content.push(WrapDataStructure(action.attributes));
+        return Proxy(SerializeKey::Name, action.name)
+                    (SerializeKey::Description, action.description)
+                    (SerializeKey::Method, action.method)
+                    (SerializeKey::Parameters, action.parameters)
+                    (SerializeKey::Attributes, 
+                        Proxy(SerializeKey::Relation, action.relation.str)
+                             (SerializeKey::URITemplate, action.uriTemplate)
+                    )
+                    (SerializeKey::Content, content)
+                    (SerializeKey::Examples, action.examples);
     }
+};
 
-    actionObject.set(SerializeKey::Content, content);
+template<> struct Wrap<Resource> {
+    sos::Object operator()(const Resource& resource) const {
+        sos::Array content;
 
-    // Transaction Examples
-    actionObject.set(SerializeKey::Examples,
-                     WrapCollection<TransactionExample>()(action.examples, WrapTransactionExample));
+        if (!resource.attributes.empty()) {
+            content.push(Wrap<DataStructure>()(resource.attributes));
+        }
 
-    return actionObject;
-}
-
-sos::Object WrapResource(const Resource& resource)
-{
-    sos::Object resourceObject;
-
-    // Element
-    resourceObject.set(SerializeKey::Element, ElementClassToString(Element::ResourceElement));
-
-    // Name
-    resourceObject.set(SerializeKey::Name, sos::String(resource.name));
-
-    // Description
-    resourceObject.set(SerializeKey::Description, sos::String(resource.description));
-
-    // URI Template
-    resourceObject.set(SerializeKey::URITemplate, sos::String(resource.uriTemplate));
-
-    // Model
-    sos::Object model = (resource.model.name.empty() ? sos::Object() : WrapPayload(resource.model));
-    resourceObject.set(SerializeKey::Model, model);
-
-    // Parameters
-    resourceObject.set(SerializeKey::Parameters,
-                       WrapCollection<Parameter>()(resource.parameters, WrapParameter));
-
-    // Actions
-    resourceObject.set(SerializeKey::Actions,
-                       WrapCollection<Action>()(resource.actions, WrapAction));
-
-    // Content
-    sos::Array content;
-
-    if (!resource.attributes.empty()) {
-        content.push(WrapDataStructure(resource.attributes));
+        return Proxy(SerializeKey::Element, ElementClassToString(Element::ResourceElement))
+                    (SerializeKey::Name, resource.name)
+                    (SerializeKey::Description, resource.description)
+                    (SerializeKey::URITemplate, resource.uriTemplate)
+                    (SerializeKey::Model, resource.model.name.empty() ? Proxy() : Proxy(resource.model))
+                    (SerializeKey::Parameters, resource.parameters)
+                    (SerializeKey::Actions, resource.actions)
+                    (SerializeKey::Content, content);
     }
-
-    resourceObject.set(SerializeKey::Content, content);
-
-    return resourceObject;
-}
+};
 
 sos::Object WrapResourceGroup(const Element& resourceGroup)
 {
-    sos::Object resourceGroupObject;
+    Proxy object;
 
     // Name
-    resourceGroupObject.set(SerializeKey::Name, sos::String(resourceGroup.attributes.name));
+    object.set(SerializeKey::Name, resourceGroup.attributes.name);
 
     // Description && Resources
     std::string description;
@@ -675,7 +534,7 @@ sos::Object WrapResourceGroup(const Element& resourceGroup)
          ++it) {
 
         if (it->element == Element::ResourceElement) {
-            resources.push(WrapResource(it->content.resource));
+            resources.push(Wrap<Resource>()(it->content.resource));
         }
         else if (it->element == Element::CopyElement) {
 
@@ -687,56 +546,54 @@ sos::Object WrapResourceGroup(const Element& resourceGroup)
         }
     }
 
-    resourceGroupObject.set(SerializeKey::Description, sos::String(description));
-    resourceGroupObject.set(SerializeKey::Resources, resources);
+    object.set(SerializeKey::Description, description);
+    object.set(SerializeKey::Resources, resources);
 
-    return resourceGroupObject;
+    return object;
 }
 
-sos::Object WrapElement(const Element& element)
-{
-    sos::Object elementObject;
+template<> struct Wrap<Element> {
+    sos::Object operator()(const Element& element) const {
+        Proxy object;
 
-    elementObject.set(SerializeKey::Element, ElementClassToString(element.element));
+        object.set(SerializeKey::Element, ElementClassToString(element.element));
 
-    if (!element.attributes.name.empty()) {
+        if (!element.attributes.name.empty()) {
+            object.set(SerializeKey::Attributes, 
+                Proxy(SerializeKey::Name, element.attributes.name)
+            );
+        }
 
-        sos::Object attributes;
+        switch (element.element) {
+            case Element::CopyElement:
+            {
+                object.set(SerializeKey::Content, element.content.copy);
+                break;
+            }
 
-        attributes.set(SerializeKey::Name, sos::String(element.attributes.name));
-        elementObject.set(SerializeKey::Attributes, attributes);
+            case Element::CategoryElement:
+            {
+                object.set(SerializeKey::Content, element.content.elements());
+                break;
+            }
+
+            case Element::DataStructureElement:
+            {
+                return Wrap<DataStructure>()(element.content.dataStructure);
+            }
+
+            case Element::ResourceElement:
+            {
+                return Wrap<Resource>()(element.content.resource);
+            }
+
+            default:
+                break;
+        }
+
+        return object;
     }
-
-    switch (element.element) {
-        case Element::CopyElement:
-        {
-            elementObject.set(SerializeKey::Content, sos::String(element.content.copy));
-            break;
-        }
-
-        case Element::CategoryElement:
-        {
-            elementObject.set(SerializeKey::Content,
-                              WrapCollection<Element>()(element.content.elements(), WrapElement));
-            break;
-        }
-
-        case Element::DataStructureElement:
-        {
-            return WrapDataStructure(element.content.dataStructure);
-        }
-
-        case Element::ResourceElement:
-        {
-            return WrapResource(element.content.resource);
-        }
-
-        default:
-            break;
-    }
-
-    return elementObject;
-}
+};
 
 bool IsElementResourceGroup(const Element& element)
 {
@@ -745,31 +602,19 @@ bool IsElementResourceGroup(const Element& element)
 
 sos::Object drafter::WrapBlueprint(const Blueprint& blueprint)
 {
-    sos::Object blueprintObject;
+    Proxy object;
 
-    // Version
-    blueprintObject.set(SerializeKey::Version, sos::String(AST_SERIALIZATION_VERSION));
+    object
+        .set(SerializeKey::Version, std::string(AST_SERIALIZATION_VERSION))
+        .set(SerializeKey::Metadata, blueprint.metadata)
+        .set(SerializeKey::Name, blueprint.name)
+        .set(SerializeKey::Description, blueprint.description)
+        .set(SerializeKey::Element, ElementClassToString(blueprint.element));
 
-    // Metadata
-    blueprintObject.set(SerializeKey::Metadata, 
-                        WrapCollection<Metadata>()(blueprint.metadata, WrapKeyValue));
-
-    // Name
-    blueprintObject.set(SerializeKey::Name, sos::String(blueprint.name));
-
-    // Description
-    blueprintObject.set(SerializeKey::Description, sos::String(blueprint.description));
-
-    // Element
-    blueprintObject.set(SerializeKey::Element, ElementClassToString(blueprint.element));
-
-    // Resource Groups
-    blueprintObject.set(SerializeKey::ResourceGroups, 
+    object.object.set(SerializeKey::ResourceGroups, 
                         WrapCollection<Element>()(blueprint.content.elements(), WrapResourceGroup, IsElementResourceGroup));
 
-    // Content
-    blueprintObject.set(SerializeKey::Content,
-                        WrapCollection<Element>()(blueprint.content.elements(), WrapElement));
+    object.set(SerializeKey::Content, blueprint.content.elements());
 
-    return blueprintObject;
+    return object;
 }
